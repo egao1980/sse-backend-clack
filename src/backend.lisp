@@ -40,12 +40,13 @@
       (funcall handler env)
       handler))
 
-(defun make-sse-app (handler &key (path nil) headers)
+(defun make-sse-app (handler &key (path nil) headers (keepalive nil))
   "Clack app that emits HANDLER's events as text/event-stream.
 
    HANDLER is a list of SSE-EVENT, a single SSE-EVENT, or
    (lambda (env) → events). Optional second value is extra response headers
-   (Clack plist). PATH when set 404s other :path-info values."
+   (Clack plist). PATH when set 404s other :path-info values.
+   KEEPALIVE T prepends one comment keepalive (does not start a timer)."
   (lambda (env)
     (block app
       (when (and path (not (string= (or (getf env :path-info) "/") path)))
@@ -53,9 +54,12 @@
           '(404 (:content-type "text/plain; charset=utf-8") ("not found"))))
       (multiple-value-bind (result extra)
           (%invoke-handler handler env)
-        (list 200
-              (sse-response-headers (append extra headers))
-              (events-body (%coerce-events result)))))))
+        (let ((events (%coerce-events result)))
+          (when keepalive
+            (setf events (cons (sse-protocol:make-sse-keepalive-event) events)))
+          (list 200
+                (sse-response-headers (append extra headers))
+                (events-body events)))))))
 
 (defun %ensure-http-server-backend ()
   (or http-server-protocol:*http-server-backend*

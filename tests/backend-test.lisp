@@ -43,6 +43,13 @@
       (ok (equal "hello" (sse-protocol:sse-event-data (first events))))
       (ok (equal "ping" (sse-protocol:sse-event-type (second events)))))))
 
+(deftest make-sse-app-keepalive-prefix
+  (let* ((app (sse-backend-clack:make-sse-app (list (ev :data "hi"))
+                                              :path "/sse" :keepalive t))
+         (body (third (funcall app (%env :path "/sse")))))
+    (ok (search ":ping" (first body)))
+    (ok (= 2 (length body)))))
+
 (deftest make-sse-app-404
   (let* ((app (sse-backend-clack:make-sse-app (list (ev :data "x")) :path "/sse"))
          (res (funcall app (%env :path "/nope"))))
