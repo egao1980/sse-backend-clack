@@ -25,6 +25,7 @@
    (cl-repo:ensure-system-dependencies "sse-backend-clack"
      :also-tests t
      :default-source :oci
+     :with '("dissect")
      :sources '(("dissect" :ql)
                 ("babel" :ql)))))
 
