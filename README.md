@@ -20,7 +20,7 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire ([brief](htt
 
 `sbcl --load scripts/app-roundtrip.lisp`
 
-CI: `setup-client` + `setup-roswell` + `scripts/ci-install.lisp` / `ci-test.lisp` (OCI only, no Quicklisp).
+CI: canned [`cl-repository`](https://github.com/egao1980/cl-repository) (`test-system.yml` / `setup-client` + `ci`). Deps from `ghcr.io/egao1980/cl-systems`.
 
 ## License
 
