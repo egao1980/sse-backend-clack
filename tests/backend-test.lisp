@@ -15,13 +15,8 @@
       (setf (gethash "last-event-id" headers) last-event-id))
     (list :path-info path :headers headers :request-method :get)))
 
-(defun %body-string (body)
-  (cond
-    ((functionp body)
-     (with-output-to-string (s) (funcall body s)))
-    ((listp body) (apply #'concatenate 'string body))
-    ((stringp body) body)
-    (t "")))
+(defun %call (app &rest env-args)
+  (sse-backend-clack:call-sse-app app (apply #'%env env-args)))
 
 (defun %bind-http ()
   (http-server-backend-hunchentoot:use-hunchentoot-backend)
@@ -37,15 +32,15 @@
                (list (ev :id "1" :data "hello")
                      (ev :event "ping" :data "ok"))
                :path "/sse"))
-         (res (funcall app (%env :path "/sse")))
+         (res (%call app :path "/sse"))
          (status (first res))
          (headers (second res))
-         (body (third res)))
+         (wire (third res)))
     (ok (= 200 status))
     (ok (equal "text/event-stream; charset=utf-8"
                (getf headers :content-type)))
-    (ok (functionp body))
-    (let ((events (with-input-from-string (in (%body-string body))
+    (ok (functionp (funcall app (%env :path "/sse"))))
+    (let ((events (with-input-from-string (in wire)
                     (sse-protocol:collect-sse-events in))))
       (ok (= 2 (length events)))
       (ok (equal "hello" (sse-protocol:sse-event-data (first events))))
@@ -54,18 +49,18 @@
 (deftest make-sse-stream-app-same-body
   (let* ((app (sse-backend-clack:make-sse-stream-app
                (list (ev :data "hi")) :path "/sse"))
-         (body (third (funcall app (%env :path "/sse")))))
-    (ok (functionp body))
-    (ok (search "data: hi" (%body-string body)))))
+         (res (%call app :path "/sse")))
+    (ok (functionp (funcall app (%env :path "/sse"))))
+    (ok (search "data: hi" (third res)))))
 
 (deftest make-sse-app-keepalive-not-prepended
   (let* ((app (sse-backend-clack:make-sse-app (list (ev :data "hi"))
                                               :path "/sse" :keepalive t))
-         (body (third (funcall app (%env :path "/sse")))))
-    (ok (functionp body))
-    (let ((wire (%body-string body)))
-      (ok (search "data: hi" wire))
-      (ng (search ":ping" wire)))))
+         (res (%call app :path "/sse"))
+         (wire (third res)))
+    (ok (functionp (funcall app (%env :path "/sse"))))
+    (ok (search "data: hi" wire))
+    (ng (search ":ping" wire))))
 
 (deftest make-sse-app-writer
   (let* ((app (sse-backend-clack:make-sse-app
@@ -75,10 +70,10 @@
                    (sse-protocol:write-sse-event stream (ev :data "from-writer"))
                    (force-output stream)))
                :path "/sse"))
-         (res (funcall app (%env :path "/sse")))
-         (evs (with-input-from-string (in (%body-string (third res)))
+         (res (%call app :path "/sse"))
+         (evs (with-input-from-string (in (third res))
                 (sse-protocol:collect-sse-events in))))
-    (ok (functionp (third res)))
+    (ok (functionp (funcall app (%env :path "/sse"))))
     (ok (= 1 (length evs)))
     (ok (equal "from-writer" (sse-protocol:sse-event-data (first evs))))))
 
@@ -94,9 +89,8 @@
                            :data (or (sse-backend-clack:request-last-event-id env)
                                      "none"))))
                :path "/sse"))
-         (res (funcall app (%env :path "/sse" :last-event-id "1")))
-         (body (%body-string (third res)))
-         (evs (with-input-from-string (in body)
+         (res (%call app :path "/sse" :last-event-id "1"))
+         (evs (with-input-from-string (in (third res))
                 (sse-protocol:collect-sse-events in))))
     (ok (equal "1" (sse-protocol:sse-event-data (first evs))))))
 

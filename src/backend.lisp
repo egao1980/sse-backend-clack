@@ -45,9 +45,59 @@
     ((eql t) sse-protocol:*sse-keepalive-interval*)
     (real keepalive)))
 
-(defun %live-stream-p (stream)
-  (and (open-stream-p stream)
-       (not (typep stream 'string-stream))))
+(defvar *sse-stream-hold* t
+  "When T, :keepalive holds the Clack response until the stream closes.
+   Tests bind this to NIL so draining a keepalive app does not block.")
+
+(defclass chunk-output-stream
+    (trivial-gray-streams:fundamental-character-output-stream)
+  ((writer :initarg :writer :accessor chunk-stream-writer)
+   (buffer :initform (make-string-output-stream) :accessor chunk-stream-buffer)
+   (open :initform t :accessor chunk-stream-open-p)
+   (hold :initarg :hold :initform t :accessor chunk-stream-hold-p)))
+
+(defmethod trivial-gray-streams:stream-write-char ((s chunk-output-stream) char)
+  (write-char char (chunk-stream-buffer s))
+  char)
+
+(defmethod trivial-gray-streams:stream-write-string
+    ((s chunk-output-stream) string &optional start end)
+  (write-string string (chunk-stream-buffer s)
+                :start (or start 0) :end end)
+  string)
+
+(defun %flush-chunk (s &key close)
+  (let ((chunk (get-output-stream-string (chunk-stream-buffer s)))
+        (writer (chunk-stream-writer s)))
+    (when (and writer (plusp (length chunk)))
+      (funcall writer chunk))
+    (when (and writer close)
+      (funcall writer nil :close t))))
+
+(defmethod trivial-gray-streams:stream-force-output ((s chunk-output-stream))
+  (%flush-chunk s)
+  nil)
+
+(defmethod trivial-gray-streams:stream-finish-output ((s chunk-output-stream))
+  (%flush-chunk s)
+  nil)
+
+(defun %close-chunk-stream (s)
+  (when (chunk-stream-open-p s)
+    (ignore-errors (%flush-chunk s :close t))
+    (setf (chunk-stream-open-p s) nil))
+  s)
+
+(defun %make-chunk-stream (writer &key (hold *sse-stream-hold*))
+  (make-instance 'chunk-output-stream :writer writer :hold hold))
+
+(defun %should-hold-p (stream)
+  (and *sse-stream-hold*
+       (open-stream-p stream)
+       (not (typep stream 'string-stream))
+       (if (typep stream 'chunk-output-stream)
+           (chunk-stream-hold-p stream)
+           t)))
 
 (defun %hold-while-open (stream)
   (loop
@@ -63,7 +113,7 @@
   event)
 
 (defun %make-stream-body (result &key keepalive)
-  "Clack body function: write RESULT (events or writer), then keepalives."
+  "Stream writer: write RESULT (events or writer), then keepalives."
   (lambda (stream)
     (let ((ka nil))
       (unwind-protect
@@ -78,19 +128,71 @@
                  (dolist (ev result)
                    (%write-event stream ev)
                    (when ka (sse-protocol:note-sse-activity ka))))
-             (when (and ka (%live-stream-p stream))
+             (when (and ka (%should-hold-p stream))
                (%hold-while-open stream)))
-        (when ka (sse-protocol:stop-sse-keepalive ka))))))
+        (when ka (sse-protocol:stop-sse-keepalive ka))
+        (ignore-errors (force-output stream))))))
+
+(defun %adapt-stream-response (status headers stream-fn)
+  "Hunchentoot ignores a function in (status headers body). Return a
+   Clack response function that obtains the chunk writer and calls
+   STREAM-FN with a character stream (force-output flushes)."
+  (lambda (responder)
+    (let* ((writer (funcall responder (list status headers)))
+           (stream (%make-chunk-stream writer :hold *sse-stream-hold*)))
+      (unwind-protect (funcall stream-fn stream)
+        (%close-chunk-stream stream)))))
+
+(defun call-sse-app (app env)
+  "Invoke APP. Returns (status headers wire-string).
+   Binds *SSE-STREAM-HOLD* to NIL so keepalive apps do not block."
+  (let ((*sse-stream-hold* nil)
+        (res (let ((*sse-stream-hold* nil))
+               (funcall app env))))
+    (cond
+      ((functionp res)
+       (let ((status nil) (headers nil) (chunks '()))
+         (funcall res
+                  (lambda (status-and-headers)
+                    (setf status (first status-and-headers)
+                          headers (second status-and-headers))
+                    (lambda (body &key (start 0) end close)
+                      (declare (ignore close))
+                      (when body
+                        (push (etypecase body
+                                (string (subseq body start (or end (length body))))
+                                ((vector (unsigned-byte 8))
+                                 (babel:octets-to-string
+                                  body :encoding :utf-8
+                                       :start start
+                                       :end (or end (length body)))))
+                              chunks))
+                      (values))))
+         (list status headers (apply #'concatenate 'string (nreverse chunks)))))
+      ((and (consp res) (functionp (third res)))
+       (list (first res) (second res)
+             (with-output-to-string (s) (funcall (third res) s))))
+      ((consp res)
+       (list (first res) (second res)
+             (let ((body (third res)))
+               (if (listp body)
+                   (apply #'concatenate 'string body)
+                   (or body "")))))
+      (t (list 500 nil "")))))
 
 (defun make-sse-stream-app (handler &key (path nil) headers (keepalive nil))
-  "Clack app whose body is (lambda (stream) …).
+  "Clack app that writes via (lambda (stream) …).
 
    HANDLER is a list of SSE-EVENT, a single SSE-EVENT,
    (lambda (env) → events | writer), or a writer (lambda (stream) …)
    returned from that handler. PATH when set 404s other :path-info.
    KEEPALIVE T (or a positive interval in seconds) runs
    MAKE-SSE-KEEPALIVE / MAYBE-WRITE-SSE-KEEPALIVE on the live stream
-   after events — not a prepended comment."
+   after events — not a prepended comment.
+
+   Direct (funcall app env) returns either a 3-list (404) or a Clack
+   response function so Hunchentoot/Woo stream chunks. Use CALL-SSE-APP
+   in tests."
   (lambda (env)
     (block app
       (when (and path (not (string= (or (getf env :path-info) "/") path)))
@@ -101,18 +203,19 @@
         (let ((payload (if (functionp result)
                            result
                            (%coerce-events result))))
-          (list 200
-                (sse-response-headers (append extra headers))
-                (%make-stream-body payload :keepalive keepalive)))))))
+          (%adapt-stream-response
+           200
+           (sse-response-headers (append extra headers))
+           (%make-stream-body payload :keepalive keepalive)))))))
 
 (defun make-sse-app (handler &key (path nil) headers (keepalive nil))
   "Clack app that emits HANDLER's events as text/event-stream.
 
-   Body is a stream function (see MAKE-SSE-STREAM-APP). HANDLER is a
-   list of SSE-EVENT, a single SSE-EVENT, or (lambda (env) → events |
-   writer). Optional second value is extra response headers (Clack
-   plist). PATH when set 404s other :path-info values.
-   KEEPALIVE T runs keepalives on the live stream after events."
+   See MAKE-SSE-STREAM-APP. HANDLER is a list of SSE-EVENT, a single
+   SSE-EVENT, or (lambda (env) → events | writer). Optional second
+   value is extra response headers (Clack plist). PATH when set 404s
+   other :path-info values. KEEPALIVE T runs keepalives on the live
+   stream after events."
   (make-sse-stream-app handler :path path :headers headers :keepalive keepalive))
 
 (defun %ensure-http-server-backend ()
