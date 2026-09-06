@@ -18,6 +18,8 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire ([brief](htt
   ...)
 ```
 
+`make-sse-app` / `make-sse-stream-app` return a Clack **body function** that writes each event (`force-output`) and, with `:keepalive t`, runs `make-sse-keepalive` on the live stream. A handler may return a writer `(lambda (stream) …)` instead of a finite event list.
+
 `sbcl --load scripts/app-roundtrip.lisp`
 
 CI: canned [`cl-repository`](https://github.com/egao1980/cl-repository) (`test-system.yml` / `setup-client` + `ci`). Deps from `ghcr.io/egao1980/cl-systems`.

@@ -1,5 +1,5 @@
 (defsystem "sse-backend-clack"
-  :version "0.1.0"
+  :version "0.1.1"
   :description "Clack/http-server-protocol emit backend for sse-protocol"
   :author "egao1980"
   :license "MIT"
