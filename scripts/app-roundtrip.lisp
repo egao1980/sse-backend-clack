@@ -25,9 +25,9 @@
        (env (list :path-info "/sse"
                   :headers (make-hash-table :test 'equal)
                   :request-method :get))
-       (res (funcall app env))
-       (body (apply #'concatenate 'string (third res)))
-       (evs (with-input-from-string (in body)
+       (res (sse-backend-clack:call-sse-app app env))
+       (wire (third res))
+       (evs (with-input-from-string (in wire)
               (sse-protocol:collect-sse-events in))))
   (unless (= 200 (first res))
     (format *error-output* "~&FAIL: status ~a~%" (first res))

@@ -18,6 +18,8 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire ([brief](htt
   ...)
 ```
 
+`make-sse-app` / `make-sse-stream-app` write each event through a stream lambda (`force-output`). Hunchentoot does not invoke a function in `(status headers body)`, so the app returns a Clack **response function** that flushes chunks. `:keepalive t` runs `make-sse-keepalive` on that live stream (not a prepended comment). A handler may return a writer `(lambda (stream) …)` instead of a finite event list.
+
 `sbcl --load scripts/app-roundtrip.lisp`
 
 CI: canned [`cl-repository`](https://github.com/egao1980/cl-repository) (`test-system.yml` / `setup-client` + `ci`). Deps from `ghcr.io/egao1980/cl-systems`.
