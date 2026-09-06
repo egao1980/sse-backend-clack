@@ -107,6 +107,19 @@
     (handler-case (force-output stream)
       (error () (return)))))
 
+(defun %hold-with-keepalive (stream keepalive)
+  "Hold the response on the request thread, emitting keepalives.
+   A background keepalive thread cannot write Hunchentoot's socket."
+  (loop
+    (unless (open-stream-p stream)
+      (return))
+    (sleep 0.05)
+    (handler-case
+        (progn
+          (sse-protocol:maybe-write-sse-keepalive keepalive)
+          (force-output stream))
+      (error () (return)))))
+
 (defun %write-event (stream event)
   (sse-protocol:write-sse-event stream event)
   (force-output stream)
@@ -122,14 +135,14 @@
                (setf ka (sse-protocol:make-sse-keepalive
                          stream
                          :interval (%keepalive-interval keepalive)
-                         :start t)))
+                         :start nil)))
              (if (functionp result)
                  (funcall result stream)
                  (dolist (ev result)
                    (%write-event stream ev)
                    (when ka (sse-protocol:note-sse-activity ka))))
              (when (and ka (%should-hold-p stream))
-               (%hold-while-open stream)))
+               (%hold-with-keepalive stream ka)))
         (when ka (sse-protocol:stop-sse-keepalive ka))
         (ignore-errors (force-output stream))))))
 
