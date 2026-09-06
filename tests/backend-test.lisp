@@ -170,6 +170,8 @@
         (ok (equal "after" (sse-protocol:sse-event-data (second evs))))))))
 
 (deftest live-keepalive-on-stream
+  "Dexador waits for the complete body, so a held stream deadlocks.
+   Read incrementally from the socket instead."
   (%bind-http)
   (let* ((port (%free-port))
          (app (sse-backend-clack:make-sse-app
@@ -177,15 +179,26 @@
                :path "/sse" :keepalive 0.05)))
     (http-server-protocol:with-server (s app :host "127.0.0.1" :port port)
       (sleep 0.2)
-      (let* ((res (http:get (format nil "http://127.0.0.1:~a/sse" port)
-                            :want-stream t
-                            :accept-encoding nil
-                            :decompress nil))
-             (reader (sse-protocol:make-sse-reader
-                      (http-protocol:body-stream res)
-                      :include-keepalives t))
-             (ev1 (sse-protocol:read-sse-event reader :include-keepalives t))
-             (ev2 (sse-protocol:read-sse-event reader :include-keepalives t)))
-        (ok (equal "hi" (sse-protocol:sse-event-data ev1)))
-        (ok (sse-protocol:sse-keepalive-p ev2))
-        (ignore-errors (close (http-protocol:body-stream res)))))))
+      (let ((sock (usocket:socket-connect "127.0.0.1" port
+                                         :timeout 2
+                                         :element-type 'character)))
+        (unwind-protect
+             (let ((stream (usocket:socket-stream sock)))
+               (format stream "GET /sse HTTP/1.1~%Host: 127.0.0.1~%Accept: text/event-stream~%~%")
+               (force-output stream)
+               (loop for line = (read-line stream nil :eof)
+                     until (or (eq line :eof)
+                               (zerop (length (string-trim '(#\return #\space) line)))))
+               (let* ((deadline (+ (get-internal-real-time)
+                                   (* 2 internal-time-units-per-second)))
+                      (buf (make-array 0 :element-type 'character
+                                        :adjustable t :fill-pointer 0)))
+                 (loop while (< (get-internal-real-time) deadline)
+                       do (let ((c (read-char-no-hang stream nil nil)))
+                            (if c
+                                (vector-push-extend c buf)
+                                (sleep 0.02)))
+                       until (and (search "data: hi" buf) (search ":ping" buf)))
+                 (ok (search "data: hi" buf))
+                 (ok (search ":ping" buf))))
+          (ignore-errors (usocket:socket-close sock)))))))
